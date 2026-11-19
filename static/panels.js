@@ -83,6 +83,47 @@ function settingsForm(ui) {
 
 const pathFor = (ui,suffix) => ui.paths.result+suffix;
 
+function levelingPanel(ui) {
+  const state=ui.leveling;
+  const regionLine = label => {
+    const region=state[label];
+    return `<p class="mono">${label==="reference"?"Reference plane":"Inspection area"}: ${
+      region?`${n(region.left*100,1)}%, ${n(region.top*100,1)}% → ${n(region.right*100,1)}%, ${n(region.bottom*100,1)}%`:"not drawn"}</p>`;
+  };
+  const ready=state.reference&&state.inspection;
+  return `${box("Tilt leveling",`
+    <p>Frame a mostly flat bottom patch as the reference plane, then frame the area to inspect. Tilt is removed with a robust fit that down-weights raised steps touching the reference edge. Pixels without reliable depth stay blank.</p>
+    <div class="row">${control("Draw reference plane","level-tool",{id:"reference",selected:ui.tool==="level-reference"})}
+      ${control("Draw inspection area","level-tool",{id:"inspection",selected:ui.tool==="level-inspection"})}</div>
+    ${regionLine("reference")}${regionLine("inspection")}
+    <div class="row">${control("Analyze tilt","level-run",{type:"accent",disabled:!ready})}
+      ${control("Back to focus surface","level-clear",{disabled:!ui.override||ui.override.kind!=="level"})}</div>
+    ${state.report?levelingReadout(state.report):""}
+  `)}`;
+}
+
+function levelingReadout(report) {
+  const ref=report.reference, check=report.inspection, unit=report.unit;
+  return `${report.warnings.map(warning).join("")}
+    <div class="leveling-summary">
+      <p class="subhead-label">Reference plane</p>
+      ${metrics([
+        ["Reliable pixels",n(ref.reliable_pixels,0)],
+        ["Down-weighted",percent(ref.rejected_fraction)],
+        ["Residual P05–P95",n(ref.residual_p05_p95,2)+" "+unit],
+      ])}
+      <p class="subhead-label">Inspection deviations from level</p>
+      ${metrics([
+        ["Median deviation",n(check.median_deviation,2)+" "+unit],
+        ["Low / high",n(check.minimum_deviation,2)+" / "+n(check.maximum_deviation,2)+" "+unit],
+        ["Max minus min",n(check.deviation_range,2)+" "+unit],
+        ["Reliable pixels",n(check.reliable_pixels,0)],
+      ])}
+      ${chart("Deviation histogram of reliable focus in the inspection area","level-chart")}
+      <p class="muted">Amber is above the leveled plane, blue below. Colors saturate at the P2/P98 limits (±${n(report.color_limit,2)} ${unit}).</p>
+    </div>`;
+}
+
 export function resultPanel(ui) {
   const cfg=ui.result.summary, selection=ui.selection, note=ui.resultPanel;
   const area=selection.kind==="area", section=selection.kind==="section";
@@ -104,6 +145,7 @@ export function resultPanel(ui) {
        ${control("Use as rail datum","datum",{disabled:!area})}${control("Calibrate pixel scale","calibrate",{disabled:!section})}
        ${control("Section CSV","section-csv",{disabled:!section})}</div>
     `)}
+    ${levelingPanel(ui)}
     ${box("Coverage details",`<form id="deficits-form" class="stack">
       ${select("Show","kind",[["both","All deficient regions"],["weak","Weak focus only"],["missing","Missing image support"]],ui.deficitKind)}
       ${field("Minimum region pixels","minimum",ui.deficitMinimum,{type:"number",min:1,step:1})}

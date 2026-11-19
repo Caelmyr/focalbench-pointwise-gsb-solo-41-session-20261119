@@ -9,6 +9,7 @@ const ui = {
   plane:null,planeView:"highlight",planeMinimum:24,
   pair:{alignment:"registered",mode:"overlay",amount:.5},recipe:{view:"split",amount:.5},
   schedule:null,paths:{},
+  leveling:{reference:null,inspection:null,report:null,mapUrl:null},
 };
 const app = el("#app"), dialog=el("#dialog");
 let noticeTimer, observer, drag=null, modalSubmit=null, measuredRequest=0;
@@ -107,6 +108,7 @@ async function loadResult(id,update=true) {
   ui.tool="inspect";ui.resultPanel="measure";ui.plane=null;
   ui.pair={alignment:"registered",mode:"overlay",amount:.5};
   ui.recipe={view:"split",amount:.5};
+  ui.leveling={reference:null,inspection:null,report:null,mapUrl:null};
   ui.tab="result";ui.paths=paths();clearSelection();
   if (update) updateHash();
   render();
@@ -198,6 +200,8 @@ function render() {
 }
 function stageNote() {
   if (ui.override) return ui.override.note??"";
+  if (ui.tool==="level-reference") return "Drag a rectangle over mostly flat bottom to define the level plane.";
+  if (ui.tool==="level-inspection") return "Drag a rectangle over the area to check against the level plane.";
   if (ui.tool==="area") return "Drag a rectangle inside the image.";
   if (ui.tool==="point") return "Click an image point to read its focus response.";
   if (ui.tool==="section") return ui.pending.length?"Click the second endpoint.":"Click two endpoints to measure a depth section.";
@@ -209,6 +213,7 @@ function refreshSide() {
   if (element&&ui.tab==="result") element.outerHTML=resultPanel(ui);
   const note=el("#stage-help");
   if (note) note.textContent=stageNote();
+  drawChart(el("#level-chart"),ui.leveling.report?levelingChart(ui.leveling.report):null);
 }
 function drawReadout() {
   const content=el("#readout");
@@ -271,12 +276,20 @@ function drawSelection() {
   }
   const rectangle=region=>[[region.left,region.top],[region.right,region.top],[region.right,region.bottom],[region.left,region.bottom]];
   for (const mark of ui.tab==="result"?ui.marks:[]) markup(mark.vertices,mark.kind,styles[mark.color],mark.label);
+  if (ui.tab==="result") {
+    const level=ui.leveling;
+    if (level.reference) markup(rectangle(level.reference),"area",styles.amber,"Reference plane");
+    if (level.inspection) markup(rectangle(level.inspection),"area",styles.cyan,"Inspection area");
+  }
   const selection=ui.selection;
   if (selection.kind==="pin") markup([selection.point],"pin",styles.amber);
   if (selection.kind==="area") markup(rectangle(selection.region),"area",styles.amber);
   if (selection.kind==="section"||selection.kind==="polygon") markup(selection.points,selection.kind,styles.amber);
   if (ui.pending.length) markup(ui.pending,ui.tool==="polygon"?"polygon":"section",styles.cyan);
-  if (drag) markup(rectangle(bounds(drag.start,drag.end)),"area",styles.amber);
+  if (drag) {
+    const levelColor=ui.tool==="level-inspection"?styles.cyan:styles.amber;
+    markup(rectangle(bounds(drag.start,drag.end)),"area",ui.tool.startsWith("level-")?levelColor:styles.amber);
+  }
   if (canvas===document.activeElement&&ui.cursor) markup([ui.cursor],"pin",styles.cyan);
 }
 
@@ -324,7 +337,7 @@ app.addEventListener("pointerdown",event=>{
   const point=pointInImage(event.clientX,event.clientY);
   if (!point) return;
   event.preventDefault();
-  if (ui.tool==="area") {
+  if (ui.tool==="area"||ui.tool.startsWith("level-")) {
     drag={start:point,end:point};event.target.setPointerCapture(event.pointerId);drawSelection();
   } else handlePoint(point);
 });
@@ -339,7 +352,10 @@ app.addEventListener("pointerup",event=>{
   if (!drag||event.target.id!=="selection-canvas") return;
   const end=pointInImage(event.clientX,event.clientY,true)??drag.end;
   const region=bounds(drag.start,end);drag=null;
-  if (region.right-region.left>=.005&&region.bottom-region.top>=.005) measure({kind:"area",region,bins:18});
+  if (region.right-region.left>=.005&&region.bottom-region.top>=.005) {
+    if (ui.tool==="level-reference"||ui.tool==="level-inspection") return captureLevelRegion(region);
+    measure({kind:"area",region,bins:18});
+  }
   else {drawSelection();toast("Drag a wider and taller rectangle.");}
 });
 app.addEventListener("keydown",event=>{
@@ -560,6 +576,63 @@ function datumDialog() {
   },{label:"Preview datum"});
 }
 
+function captureLevelRegion(region) {
+  const slot=ui.tool==="level-reference"?"reference":"inspection";
+  ui.leveling[slot]=region;
+  ui.leveling.report=null;
+  ui.tool="inspect";
+  drawSelection();refreshSide();
+  toast(slot==="reference"?"Reference plane framed. Now draw the inspection area.":"Inspection area framed. Use Analyze tilt to level the surface.");
+}
+
+function levelQuery(reference,inspection) {
+  const args={};
+  for (const [key,value] of Object.entries(reference)) args["reference_"+key]=value;
+  for (const [key,value] of Object.entries(inspection)) args["inspection_"+key]=value;
+  return search(args);
+}
+
+async function runLeveling() {
+  const state=ui.leveling;
+  if (!state.reference||!state.inspection) return;
+  const base=ui.paths.result;
+  try {
+    const report=await api(base+"/level",{method:"POST",
+      data:{reference:state.reference,inspection:state.inspection}});
+    state.report=report;
+    state.mapUrl=base+"/level.png?"+levelQuery(state.reference,state.inspection)+"&t="+(++measuredRequest);
+    ui.override={
+      kind:"level",src:state.mapUrl,label:"Leveled deviation map",
+      info:ui.result.summary.width+" × "+ui.result.summary.height+" output pixels",
+      note:"Amber is above the leveled reference plane, blue below · blank pixels have no reliable depth",
+      selectable:false,
+    };
+    ui.tool="inspect";
+    render();
+    drawChart(el("#level-chart"),levelingChart(report));
+    showReadout("Tilt-leveled inspection",levelingReadoutBody(report),levelingChart(report));
+  } catch(error) { toast(error.message,true); }
+}
+
+function levelingReadoutBody(report) {
+  const ref=report.reference, check=report.inspection, unit=report.unit;
+  return report.warnings.map(warning).join("")+metrics([
+    ["Median deviation",n(check.median_deviation,2)+" "+unit],
+    ["Max minus min",n(check.deviation_range,2)+" "+unit],
+    ["Lowest / highest",n(check.minimum_deviation,2)+" / "+n(check.maximum_deviation,2)+" "+unit],
+    ["Reliable pixels",n(check.reliable_pixels,0)],
+    ["Reference down-weighted",percent(ref.rejected_fraction)],
+    ["Color saturation",n(report.color_limit,2)+" "+unit],
+  ])+chart("Deviation histogram of reliable focus in the inspection area");
+}
+
+function levelingChart(report) {
+  const hist=report.inspection.histogram;
+  if (!hist.edges.length) return null;
+  return {unit:report.unit,ymin:0,series:[{bars:true,color:"#ecbb72",
+    points:hist.counts.map((count,i)=>[(hist.edges[i]+hist.edges[i+1])/2,count])}]};
+}
+
 function calibrationDialog() {
   const points=ui.selection.points, base=ui.paths.result+"/calibration";
   const body=`<div class="field-row">${field("Known distance","length","",{type:"number",step:"any",required:true})}
@@ -653,6 +726,12 @@ const buttonActions={
   "tool":id=>{
     ui.tool=id;ui.override=null;ui.pending=[];ui.cursor=[.5,.5];render();
   },
+  "level-tool":id=>{
+    ui.tool="level-"+id;ui.override=null;ui.pending=[];ui.cursor=[.5,.5];
+    clearSelection();render();
+  },
+  "level-run":runLeveling,
+  "level-clear":()=>{ui.override=null;ui.layer="depth";render();},
   "finish-polygon":()=>{
     if (ui.pending.length<3) return;
     ui.selection={kind:"polygon",points:ui.pending.slice()};ui.pending=[];ui.readout=null;ui.tool="inspect";render();

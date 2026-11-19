@@ -138,6 +138,7 @@ small, .muted { color:var(--muted); }
 .metric strong { display:block; margin-top:4px; font:clamp(11px,1.8vw,15px) var(--mono); overflow-wrap:anywhere; }
 .chart { width:100%; height:122px; display:block; margin:8px 0 0; background:#12161a; border:1px solid var(--border); border-radius:7px; }
 .warning { color:var(--accent-hi); background:#2c251b; border-left:2px solid #c29a60; font-size:12px; padding:7px 9px; margin:7px 0; overflow-wrap:anywhere; }
+.subhead-label { font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--faint); margin:8px 0 2px; }
 .error { color:var(--bad); }
 .success { color:var(--teal); }
 table { width:100%; border-collapse:collapse; font-size:12px; }

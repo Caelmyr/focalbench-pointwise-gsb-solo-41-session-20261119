@@ -12,6 +12,7 @@ from .http import (
     engine, file_response, file_title, library, optional_payload, payload, png_response,
     region_of, region_query, revision,
 )
+from .leveling import level_image, level_surface
 from .models import (
     Mark, Region, Unprocessable, choice, flag, integer, number, parse_points_query, parse_vertex,
     require_id, short_text, validate_keys,
@@ -306,6 +307,33 @@ def result_datum(project_id, run_id):
         stack = apply_datum(library(), project_id, inspection, measurement, revision(data))
         return {"measurement": measurement, "stack": stack}
     return measurement
+
+
+def _level_regions(args) -> tuple[Region, Region]:
+    names = ("left", "top", "right", "bottom")
+    reference = Region.parse({name: args.get("reference_" + name) for name in names})
+    target = Region.parse({name: args.get("inspection_" + name) for name in names})
+    return reference, target
+
+
+@results.post("/<run_id>/level")
+def level_surface_reading(project_id, run_id):
+    _, inspection = archived(project_id, run_id)
+    data = payload()
+    validate_keys(data, {"reference", "inspection"})
+    reference = Region.parse(data.get("reference"))
+    target = Region.parse(data.get("inspection"))
+    return level_surface(inspection, reference, target).report
+
+
+@results.get("/<run_id>/level.png")
+def level_surface_map(project_id, run_id):
+    _, inspection = archived(project_id, run_id)
+    reference, target = _level_regions(request.args)
+    leveling = level_surface(inspection, reference, target)
+    run = library().run(project_id, run_id)
+    heading = file_title(run["title"], "-leveled-surface.png") if request.args.get("download") else None
+    return png_response(level_image(inspection, leveling), heading)
 
 @results.get("/<run_id>/marks.csv")
 def annotations_download(project_id, run_id):
