@@ -106,13 +106,27 @@ def interpolate_depth(
     usable: np.ndarray,
     selected: np.ndarray,
     positions: np.ndarray,
+    display: np.ndarray | None = None,
+    outside: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Place each peak between neighbouring planes.
+
+    ``positions`` orders and scales the local peak fit. ``display`` supplies the
+    reported value at the same plane locations; it differs from ``positions``
+    when the rail is calibrated with unequal step-to-height spans. ``outside``
+    marks planes whose displayed height is not calibrated, so a fitted peak that
+    is anchored on one of them stays unmeasured instead of extrapolating.
+    """
+    if display is None:
+        display = positions
+    if outside is None:
+        outside = np.zeros(len(positions), dtype=bool)
     last = len(positions) - 1
     left_index = np.maximum(selected - 1, 0)
     right_index = np.minimum(selected + 1, last)
-    depth = positions[selected].astype(np.float64)
-    left_dx = depth - positions[left_index]
-    right_dx = positions[right_index] - depth
+    depth = display[selected].astype(np.float64)
+    left_dx = positions[selected] - positions[left_index]
+    right_dx = positions[right_index] - positions[selected]
     eligible = (
         (selected > 0)
         & (selected < last)
@@ -120,6 +134,9 @@ def interpolate_depth(
         & _at_stack(usable, right_index)
         & (left_dx > TINY)
         & (right_dx > TINY)
+        & ~outside[selected]
+        & ~outside[left_index]
+        & ~outside[right_index]
     )
     if not eligible.any():
         return depth, eligible
@@ -130,6 +147,9 @@ def interpolate_depth(
     upper = _at_stack(scores, right_index)[indices].astype(np.float64)
     step_left = left_dx[indices]
     step_right = right_dx[indices]
+    display_left = display[left_index[indices]].astype(np.float64)
+    display_right = display[right_index[indices]].astype(np.float64)
+    display_center = display[selected[indices]].astype(np.float64)
     slope_left = (center - lower) / step_left
     slope_right = (upper - center) / step_right
     curvature = (slope_right - slope_left) / (step_left + step_right)
@@ -143,8 +163,15 @@ def interpolate_depth(
         & (np.maximum(lower, upper) >= center * 0.18)
         & (np.maximum(step_left, step_right) <= 4 * np.minimum(step_left, step_right))
     )
+    fitted = np.where(vertex >= 0, display_center + vertex / step_right * (display_right - display_center),
+                      display_center + vertex / step_left * (display_center - display_left))
+    # A calibrated rail can step irregularly; keep a fit inside the span the
+    # three samples actually bracket.
+    low = np.fmin(display_center, np.fmin(display_left, display_right))
+    high = np.fmax(display_center, np.fmax(display_left, display_right))
+    can_fit &= (fitted >= low) & (fitted <= high)
     accepted = tuple(axis[can_fit] for axis in indices)
-    depth[accepted] += vertex[can_fit]
+    depth[accepted] = fitted[can_fit]
     eligible[indices] = can_fit
     return depth, eligible
 
@@ -155,6 +182,7 @@ def analyze_peaks(
     strict_support: np.ndarray,
     positions: np.ndarray,
     floor: float,
+    display: np.ndarray | None = None,
 ) -> FocusEvidence:
     has_strict_support = strict_support.any(axis=0)
     usable = strict_support | (~has_strict_support[None, ...] & coverage)
@@ -164,14 +192,20 @@ def analyze_peaks(
     picked = weighted.argmax(axis=0).astype(np.int32)
     peak = _at_stack(scores, picked)
     competitor, alternate = peak_competitor(scores, usable, picked)
-    depth, interpolated = interpolate_depth(scores, strict_support, picked, positions)
+    outside = np.zeros(len(positions), dtype=bool) if display is None else ~np.isfinite(display)
+    depth, interpolated = interpolate_depth(scores, strict_support, picked, positions, display, outside)
     confidence = confidence_map(peak, competitor, support_count, len(positions))
     confidence[~has_strict_support] = 0
     reliable = valid & has_strict_support & (support_count >= 2) & (peak > RESPONSE_NOISE)
     reliable &= confidence >= max(floor, np.finfo(np.float32).eps)
+    reliable &= ~outside[picked]
     depth[~valid] = np.nan
+    outside_depth = ~np.isfinite(depth) | outside[picked]
+    depth[outside_depth] = np.nan
+    reliable &= ~outside_depth
+    interpolated &= reliable
     return FocusEvidence(
-        picked, alternate, depth, confidence, valid, reliable, interpolated & reliable,
+        picked, alternate, depth, confidence, valid, reliable, interpolated,
         support_count, peak,
     )
 
@@ -221,6 +255,10 @@ def rail_statistics(positions: np.ndarray) -> dict:
     }
 
 
+def _readable(position: float) -> float | None:
+    return None if position is None or not np.isfinite(position) else float(position)
+
+
 def peak_path_from_volume(
     response: np.ndarray,
     support: np.ndarray,
@@ -233,7 +271,7 @@ def peak_path_from_volume(
         supported = bool(support[plane, y, x])
         path.append({
             "index": plane,
-            "position": position,
+            "position": _readable(position),
             "supported": supported,
             "response": float(response[plane, y, x]) if supported else None,
         })
@@ -254,7 +292,7 @@ def aggregate_response_window(
         values = plane[mask]
         result.append({
             "index": index,
-            "position": position,
+            "position": _readable(position),
             "valid_count": int(values.size),
             "mean": float(values.mean(dtype=np.float64)) if values.size else None,
             "p75": float(np.percentile(values, 75)) if values.size else None,

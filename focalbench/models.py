@@ -194,27 +194,152 @@ class Region:
         return asdict(self)
 
 
+MAX_RAIL_POINTS = 12
+RAIL_MODES = ("linear", "calibration")
+
+
+@dataclass(frozen=True)
+class RailCalibration:
+    """Measured pairs of stage steps and actual focus height in micrometres.
+
+    The points must increase in both coordinates. Heights between marks are
+    interpolated linearly, so spans with different um-per-step ratios are kept
+    exact at every measured mark. Steps outside the first and last mark have no
+    calibrated height.
+    """
+
+    points: tuple
+
+    @classmethod
+    def parse(cls, payload: Any):
+        raw = object_value(payload, "rail calibration")
+        validate_keys(raw, {"points"}, "rail calibration")
+        rows = raw.get("points")
+        if not isinstance(rows, list) or not 2 <= len(rows) <= MAX_RAIL_POINTS:
+            raise WorkbenchError(
+                f"Enter between 2 and {MAX_RAIL_POINTS} step and height pairs.",
+                field="rail_calibration",
+            )
+        points = []
+        for index, row in enumerate(rows, 1):
+            label = f"rail calibration pair {index}"
+            if isinstance(row, (list, tuple)) and len(row) == 2:
+                step = number(row[0], f"step on pair {index}", -1e7, 1e7)
+                um = number(row[1], f"height on pair {index}", -1e7, 1e7)
+                points.append((step, um))
+                continue
+            raw_row = object_value(row, label)
+            validate_keys(raw_row, {"step", "um"}, label)
+            step = number(raw_row.get("step"), f"step on pair {index}", -1e7, 1e7)
+            um = number(raw_row.get("um"), f"height on pair {index}", -1e7, 1e7)
+            points.append((step, um))
+        for index in range(1, len(points)):
+            step, um = points[index]
+            last_step, last_um = points[index - 1]
+            if step <= last_step:
+                raise WorkbenchError(
+                    "Rail calibration steps must increase from one pair to the next.",
+                    field="rail_calibration",
+                )
+            if um <= last_um:
+                raise WorkbenchError(
+                    "Rail calibration heights must increase from one pair to the next.",
+                    field="rail_calibration",
+                )
+        return cls(tuple(points))
+
+    def height_at(self, step: float) -> float | None:
+        points = self.points
+        if step < points[0][0] or step > points[-1][0]:
+            return None
+        index = 1
+        while index < len(points) - 1 and step > points[index][0]:
+            index += 1
+        (left_step, left_um), (right_step, right_um) = points[index - 1], points[index]
+        ratio = (step - left_step) / (right_step - left_step)
+        return left_um + ratio * (right_um - left_um)
+
+    def step_at(self, height: float) -> float | None:
+        points = self.points
+        if height < points[0][1] or height > points[-1][1]:
+            return None
+        index = 1
+        while index < len(points) - 1 and height > points[index][1]:
+            index += 1
+        (left_step, left_um), (right_step, right_um) = points[index - 1], points[index]
+        ratio = (height - left_um) / (right_um - left_um)
+        return left_step + ratio * (right_step - left_step)
+
+    def public(self) -> dict:
+        return {"points": [{"step": step, "um": um} for step, um in self.points]}
+
+
 @dataclass(frozen=True)
 class CaptureScale:
-    """Calibration in original reference-image pixels with separate XY and rail units."""
+    """Calibration in original reference-image pixels with separate XY and rail units.
+
+    ``rail_mode == "calibration"`` replaces the offset-only rail reading with a
+    measured step-to-height table; the surface unit is then always micrometres.
+    """
 
     pixel_um: float | None = None
     rail_unit: str = "µm"
     rail_offset: float = 0.0
+    rail_mode: str = "linear"
+    calibration: RailCalibration | None = None
 
     @classmethod
     def parse(cls, payload: Any):
         raw = object_value(payload, "scale")
-        validate_keys(raw, {"pixel_um", "rail_unit", "rail_offset"}, "scale")
+        validate_keys(
+            raw, {"pixel_um", "rail_unit", "rail_offset", "rail_mode", "calibration"}, "scale",
+        )
         pixel = raw.get("pixel_um")
+        calibration_row = raw.get("calibration")
+        calibration = None
+        if calibration_row not in (None, {}):
+            calibration = RailCalibration.parse(calibration_row)
+        mode = choice(raw.get("rail_mode", "linear"), "rail scale", RAIL_MODES)
+        if mode == "calibration" and calibration is None:
+            raise WorkbenchError(
+                "Enter at least two step and height pairs for a calibrated rail scale.",
+                field="rail_calibration",
+            )
         return cls(
             pixel_um=None if pixel is None else number(pixel, "pixel size", 0.001, 100000.0),
-            rail_unit=choice(raw.get("rail_unit", "µm"), "rail unit", UNITS),
+            # Measured pairs are keyed by stage steps, so entry stays in steps
+            # while every surface reading is reported in micrometres.
+            rail_unit="step" if mode == "calibration" else choice(
+                raw.get("rail_unit", "µm"), "rail unit", ("µm", "mm", "step"),
+            ),
             rail_offset=number(raw.get("rail_offset", 0), "rail offset", -10_000_000, 10_000_000),
+            rail_mode=mode,
+            calibration=calibration,
         )
 
+    @property
+    def calibrated(self) -> bool:
+        return self.rail_mode == "calibration" and self.calibration is not None
+
+    @property
+    def surface_unit(self) -> str:
+        return "µm" if self.calibrated else self.rail_unit
+
     def display_position(self, position: float) -> float:
+        if self.calibrated:
+            height = self.calibration.height_at(position)
+            return float("nan") if height is None else height
         return position - self.rail_offset
+
+    def public(self) -> dict:
+        value = {
+            "pixel_um": self.pixel_um,
+            "rail_unit": self.rail_unit,
+            "rail_offset": self.rail_offset,
+            "rail_mode": self.rail_mode,
+            "calibration": None if self.calibration is None else self.calibration.public(),
+        }
+        return value
 
 
 @dataclass(frozen=True)

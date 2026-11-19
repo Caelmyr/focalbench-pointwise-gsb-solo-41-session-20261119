@@ -77,6 +77,8 @@ def common_grid(first: CoordinateFrame, second: CoordinateFrame) -> Grid:
 
 
 def _original_unit(values: np.ndarray, inspection: Inspection) -> np.ndarray:
+    if inspection.summary.get("rail_calibration"):
+        return values
     original = values + inspection.summary["scale"]["rail_offset"]
     return original * 1000 if inspection.unit == "mm" else original
 
@@ -84,6 +86,8 @@ def _original_unit(values: np.ndarray, inspection: Inspection) -> np.ndarray:
 def _can_compare(first: Inspection, second: Inspection) -> str:
     if first.summary["reference_id"] != second.summary["reference_id"]:
         raise Unprocessable("Choose two results with the same reference capture.")
+    if bool(first.summary.get("rail_calibration")) != bool(second.summary.get("rail_calibration")):
+        raise Unprocessable("A calibrated rail result cannot be compared with a result using a linear rail.")
     if (first.frame.original_width, first.frame.original_height) != (
         second.frame.original_width, second.frame.original_height
     ):
@@ -141,6 +145,9 @@ def _settings_diff(before: dict, after: dict) -> list[dict]:
         a, b = before.get(field), after.get(field)
         if a == b:
             continue
+        if field == "calibration" and isinstance(a, dict) and isinstance(b, dict):
+            if a.get("points") == b.get("points"):
+                continue
         if isinstance(a, dict) and isinstance(b, dict):
             rows.extend({**item, "field": f"{field}.{item['field']}"} for item in _settings_diff(a, b))
         else:
@@ -193,7 +200,10 @@ def describe_comparison(comparison: RerenderComparison) -> dict:
         "p95_absolute_difference": float(np.percentile(sample, 95)) if sample.size else None,
         "settings_changes": changes,
         "capture_changes": discrepancies,
-        "settings_note": "Depth difference compares full rail positions before subtracting either result's origin.",
+        "settings_note": (
+            "Depth difference compares measured surface heights; a linear rail is "
+            "normalized to its full position before subtracting the result origin."
+        ),
     }
 
 

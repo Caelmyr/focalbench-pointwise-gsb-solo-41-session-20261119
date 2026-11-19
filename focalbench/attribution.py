@@ -81,7 +81,7 @@ def contribution_summary(inspection: Inspection, attribution: Attribution, minim
         "capture": {
             "id": attribution.capture["id"],
             "name": attribution.capture["name"],
-            "position": attribution.row["display_position"],
+            "position": attribution.row.get("display_position"),
             "unit": inspection.unit,
         },
         "eligible_pixels": int(attribution.eligible.sum()),

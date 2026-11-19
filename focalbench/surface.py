@@ -84,8 +84,11 @@ class Inspection:
         self.directory = directory
         self.summary = summary
         self.frame = CoordinateFrame.from_summary(summary)
-        self.positions = [row["display_position"] for row in summary["captures"]]
-        self.unit = summary["scale"]["rail_unit"]
+        # Archive compatibility: results made before surface units existed keep
+        # the raw rail unit and offset-applied display values.
+        self.surface_unit = summary.get("surface_unit", summary["scale"]["rail_unit"])
+        self.positions = self._plane_values()
+        self.unit = self.surface_unit
         self.depth = self._layer("depth")
         self.confidence = self._layer("confidence")
         self.winner = self._layer("selected")
@@ -94,6 +97,22 @@ class Inspection:
         self.interpolated = self._layer("interpolated")
         self.valid = self._layer("valid")
         self.contributors = self._layer("contributors")
+
+    def _plane_values(self) -> list:
+        rows = self.summary["captures"]
+        if not all("display_position" in row for row in rows):
+            offset = self.summary["scale"].get("rail_offset", 0.0)
+            return [float(row["position"]) - offset for row in rows]
+        # A missing display position means the plane sits outside a calibrated
+        # rail table, so readings that depend on that plane stay empty.
+        return [None if row["display_position"] is None else float(row["display_position"]) for row in rows]
+
+    def plane_value(self, index: int):
+        value = self.positions[index]
+        return None if value is None or not np.isfinite(value) else float(value)
+
+    def known_positions(self) -> list:
+        return [value for value in self.positions if value is not None and np.isfinite(value)]
 
     def _layer(self, name: str) -> np.ndarray:
         path = self.directory / (name + ".npy")
@@ -118,7 +137,7 @@ class Inspection:
             "visible": visible,
             "capture_index": focus_index,
             "capture_id": self.summary["captures"][focus_index]["id"] if focus_index is not None else None,
-            "runner_up": self.positions[alternate] if alternate is not None and alternate != focus_index else None,
+            "runner_up": self.plane_value(alternate) if alternate is not None and alternate != focus_index else None,
         }
         if trace:
             value["response"] = peak_path_from_volume(
@@ -159,7 +178,10 @@ class Inspection:
         }
 
     def _histogram(self, values: np.ndarray, bins: int) -> dict:
-        lower, higher = self.positions[0], self.positions[-1]
+        measured = self.known_positions()
+        if not measured:
+            return {"edges": [], "counts": []}
+        lower, higher = min(measured), max(measured)
         edges = np.linspace(lower, higher, bins + 1)
         clipped = np.clip(values, lower, higher)
         counts, _ = np.histogram(clipped, bins=edges)
@@ -196,8 +218,9 @@ class Inspection:
             "confidence": percentile_summary(self.confidence[viewport], visible),
             "histogram": self._histogram(depths[reliable], bins),
             "frame_occupancy": [
-                {"capture_id": capture["id"], "position": position, "pixels": int(occupied[index])}
-                for index, (capture, position) in enumerate(zip(self.summary["captures"], self.positions))
+                {"capture_id": capture["id"], "position": self.plane_value(index),
+                 "pixels": int(occupied[index])}
+                for index, capture in enumerate(self.summary["captures"])
             ],
         }
 

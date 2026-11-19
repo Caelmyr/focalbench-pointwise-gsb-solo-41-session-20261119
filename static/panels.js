@@ -64,8 +64,13 @@ export function capturePanel(ui) {
 }
 
 function settingsForm(ui) {
-  const config=ui.stack.settings;
+  const config=ui.stack.settings, scale=ui.railDraft??config.scale;
+  const calibrated=scale.rail_mode==="calibration";
   const references=ui.stack.captures.filter(item=>item.included&&!item.archived).map(item=>[item.id,item.name+" ("+n(item.position)+")"]);
+  const pairRow=(row={})=>`<div class="field-row three-fields">
+      ${field("Stage step","step",row.step??"",{type:"number",step:"any"})}${field("Height (µm)","um",row.um??"",{type:"number",step:"any"})}
+      <button type="button" class="quiet" data-action="remove-rail-pair">Remove</button></div>`;
+  const pairs=(scale.calibration?.points??[]).map(pairRow).join("");
   return `<form id="settings-form" class="box stack">
     <h3>Reconstruction recipe</h3>
     ${select("Registration","registration",[["breathing","Translate and scale"],["translation","Translation only"],["none","Already aligned"]],config.registration)}
@@ -75,8 +80,12 @@ function settingsForm(ui) {
     ${select("Viewport","viewport",[["reference","Full reference image"],["shared","Shared coverage crop"]],config.viewport)}
     <div class="field-row">${field("Confidence floor","confidence_floor",config.confidence_floor,{type:"number",min:0,max:.95,step:.01})}${field("Guard border (px)","edge_guard",config.edge_guard,{type:"number",min:0,max:12,step:1})}</div>
     ${field("Fusion strength","strength",config.strength,{type:"number",min:.1,max:1,step:.05})}
-    <div class="field-row">${select("Rail unit","rail_unit",[["µm","µm"],["mm","mm"],["step","Stage steps"]],config.scale.rail_unit)}${field("Rail origin","rail_offset",config.scale.rail_offset,{type:"number",step:"any"})}</div>
-    ${field("Reference pixel size (µm / px)","pixel_um",config.scale.pixel_um??"",{type:"number",step:"any",placeholder:"Uncalibrated"})}
+    ${select("Rail scale","rail_mode",[["linear","One rail unit per step"],["calibration","Measured step and height pairs"]],scale.rail_mode??"linear")}
+    <div class="stack" data-rail-blocks="calibration"${calibrated?"":" hidden"}><p class="muted">Capture positions are stage steps. Each surface reading is the measured height in µm; steps outside the first and last pair stay unmeasured.</p>
+      <div id="rail-pairs" class="stack">${pairs||`<p class="muted empty-pair">Add at least two pairs.</p>`}</div>
+      ${control("Add pair","add-rail-pair")}</div>
+    <div class="field-row" data-rail-blocks="linear"${calibrated?" hidden":""}>${select("Rail unit","rail_unit",[["µm","µm"],["mm","mm"],["step","Stage steps"]],scale.rail_unit)}${field("Rail origin","rail_offset",scale.rail_offset,{type:"number",step:"any"})}</div>
+    ${field("Reference pixel size (µm / px)","pixel_um",scale.pixel_um??"",{type:"number",step:"any",placeholder:"Uncalibrated"})}
     <button type="submit">Save recipe</button>
   </form>`;
 }
@@ -94,7 +103,8 @@ export function resultPanel(ui) {
     content = `${box("Archived reconstruction",`
       ${stat("Reference",cfg.reference_name)}${stat("Viewport",cfg.settings.viewport==="shared"?"Shared coverage":"Reference image")}
       ${stat("XY scale",cfg.scale.pixel_um===null?"Uncalibrated":n(cfg.scale.pixel_um,4)+" µm / px")}
-      ${stat("Rail origin",n(cfg.scale.rail_offset)+" "+cfg.scale.rail_unit)}
+      ${stat("Rail scale",cfg.rail_calibration?`${cfg.rail_calibration.points.length} measured pairs`:"One unit per step")}
+      ${stat("Rail origin",cfg.rail_calibration?"Absolute µm":n(cfg.scale.rail_offset)+" "+cfg.scale.rail_unit)}
       ${stat("Reliable focus",percent(cfg.reliable_fraction))}
       ${stat("Shared frame overlap",percent(cfg.coverage.shared_fraction))}
       ${cfg.warnings.length?`<details><summary>${cfg.warnings.length} observation${cfg.warnings.length===1?"":"s"}</summary>${cfg.warnings.map(item=>warning(item.detail)).join("")}</details>`:""}
@@ -119,13 +129,14 @@ export function resultPanel(ui) {
 
 function planePanel(ui) {
   const frames=ui.result.summary.captures;
-  const unit=ui.result.summary.scale.rail_unit;
+  const unit=ui.result.summary.surface_unit;
+  const position=item=>item.display_position===null?`step ${n(item.position)} · outside calibration`:n(item.display_position)+" "+unit;
   return `${box("Source contribution",`<form id="planes-form" class="stack">
-    ${select("Capture","capture",frames.map(item=>[item.id,item.name+" · "+n(item.display_position)+" "+unit]),ui.plane??frames[0]?.id)}
+    ${select("Capture","capture",frames.map(item=>[item.id,item.name+" · "+position(item)]),ui.plane??frames[0]?.id)}
     ${select("Display","view",[["highlight","Highlight reliable winners"],["registered","Aligned capture"],["mask","Winner mask"]],ui.planeView)}
     ${field("Minimum island pixels","minimum",ui.planeMinimum,{type:"number",min:1,step:1})}<button type="submit">Inspect plane</button>
   </form>`)}
-  ${box("Capture evidence",`${table(["Rail "+unit,"Shift","Zoom","Wins"],frames.map(item=>[n(item.display_position,2),n(item.motion.dx,1)+", "+n(item.motion.dy,1),n(item.motion.scale,4),percent(item.winner_fraction)]))}
+  ${box("Capture evidence",`${table(["Rail "+unit,"Shift","Zoom","Wins"],frames.map(item=>[position(item),n(item.motion.dx,1)+", "+n(item.motion.dy,1),n(item.motion.scale,4),percent(item.winner_fraction)]))}
     ${link("Capture evidence CSV",pathFor(ui,"/captures.csv"))}`)}`;
 }
 
@@ -166,7 +177,7 @@ function notebookPanel(ui) {
 }
 
 export function resultOverview(summary) {
-  const depth=summary.depth_statistics, rail=summary.scale.rail_unit;
+  const depth=summary.depth_statistics, rail=summary.surface_unit;
   return metrics([
     ["Visible area",percent(summary.visible_fraction)],["Reliable focus",percent(summary.reliable_fraction)],
     ["Median depth",n(depth.median)+" "+rail],["Depth P05–P95",n(depth.p05)+" – "+n(depth.p95)+" "+rail],
@@ -180,17 +191,17 @@ export function readoutPanel(title,body) {
 export function measurementReadout(selection,data) {
   if (selection.kind==="pin") return [
     data.reliable?"Point reading":"Point · insufficient focus evidence",
-    metrics([["Focus position",n(data.position)+" "+data.unit],["Confidence",percent(data.confidence)],["Contributors",data.support],["Original x / y",n(data.source_x,1)+" / "+n(data.source_y,1)]])+chart("Focus response across capture positions"),
+    metrics([["Focus position",data.reliable?n(data.position)+" "+data.unit:"Outside the measured rail calibration"],["Confidence",percent(data.confidence)],["Contributors",data.support],["Original x / y",n(data.source_x,1)+" / "+n(data.source_y,1)]])+chart("Focus response across capture positions"),
     {unit:data.unit,ymin:0,series:[{points:data.response.map(row=>[row.position,row.response])}]},
   ];
   if (selection.kind==="section") return [
     "Depth section",
-    metrics([["Length",n(data.length_um??data.length_px)+" "+(data.length_um===null?"px":"µm")],["Reliable samples",percent(data.reliable_fraction)],["Depth min / max",n(data.minimum)+" / "+n(data.maximum)+" "+data.unit]])+chart("Depth along the selected section"),
+    metrics([["Length",n(data.length_um??data.length_px)+" "+(data.length_um===null?"px":"µm")],["Reliable samples",percent(data.reliable_fraction)],["Depth min / max",data.reliable_count?n(data.minimum)+" / "+n(data.maximum)+" "+data.unit:"No measured depth"]])+chart("Depth along the selected section"),
     {unit:data.length_um===null?"px":"µm",series:[{color:"#8dd5bd",points:data.samples.map(row=>[row.distance_um??row.distance,row.position])}]},
   ];
   return [
     "Area measurement",
-    metrics([["Selected pixels",n(data.pixels,0)],["Reliable focus",percent(data.reliable_fraction)],["Median depth",n(data.positions.median)+" "+data.unit],["P05–P95",n(data.positions.p05)+" – "+n(data.positions.p95)]])+chart("Depth histogram of reliable focus in the area"),
+    metrics([["Selected pixels",n(data.pixels,0)],["Reliable focus",percent(data.reliable_fraction)],["Median depth",data.reliable_pixels?n(data.positions.median)+" "+data.unit:"No measured depth"],["P05–P95",data.reliable_pixels?n(data.positions.p05)+" – "+n(data.positions.p95):"—"]])+chart("Depth histogram of reliable focus in the area"),
     {unit:data.unit,ymin:0,series:[{bars:true,points:data.histogram.counts.map((count,i)=>[(data.histogram.edges[i]+data.histogram.edges[i+1])/2,count])}]},
   ];
 }

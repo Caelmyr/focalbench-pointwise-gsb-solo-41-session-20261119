@@ -75,7 +75,6 @@ def _patch_depth_file(inspection: Inspection, patch: Patch) -> bytes:
 def _patch_csv(inspection: Inspection, patch: Patch) -> bytes:
     if patch.pixel_count > MAX_CSV_PIXELS:
         raise Capacity(f"Select a patch of up to {MAX_CSV_PIXELS:,} pixels for a sample CSV.")
-    positions = inspection.positions
     ids = [capture["id"] for capture in inspection.summary["captures"]]
     samples = []
     for y in range(patch.top, patch.bottom):
@@ -88,7 +87,8 @@ def _patch_csv(inspection: Inspection, patch: Patch) -> bytes:
                 x, y, original_x, original_y, visible, reliable,
                 float(inspection.depth[y, x]) if reliable else None,
                 float(inspection.confidence[y, x]) if visible else None,
-                ids[index] if visible else None, positions[index] if visible else None,
+                ids[index] if visible else None,
+                inspection.plane_value(index) if visible else None,
             ))
     return csv_bytes(
         ("output_x", "output_y", "original_center_x", "original_center_y", "visible", "reliable",
@@ -134,6 +134,7 @@ def metadata_for_patch(inspection: Inspection, result: dict, patch: Patch) -> di
         "depth_png": {
             "near": encoding["near"], "far": encoding["far"],
             "no_data": encoding["no_data"], "minimum_code": 1, "maximum_code": 65535,
+            "unit": encoding["unit"], "calibrated": encoding.get("calibrated", False),
         },
         **mapped,
     }

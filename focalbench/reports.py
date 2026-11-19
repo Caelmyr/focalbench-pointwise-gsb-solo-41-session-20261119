@@ -81,8 +81,8 @@ def _capture_rows(summary: dict):
         motion = item["motion"]
         yield (
             item["index"] + 1, item["slot"], item["id"], item["name"], item["position"],
-            item["display_position"], summary["scale"]["rail_unit"], item["is_reference"],
-            motion["dx"], motion["dy"], motion["scale"], motion["score"], motion["overlap"],
+            item["display_position"], summary.get("surface_unit", summary["scale"]["rail_unit"]),
+            item["is_reference"],            motion["dx"], motion["dy"], motion["scale"], motion["score"], motion["overlap"],
             item["valid_fraction"], item["median_response"], item["p95_response"],
             item["winner_count"], item["winner_fraction"], motion["warning"],
         )
@@ -212,7 +212,7 @@ def _image_card(sheet, source, position, bounds, title, description):
 
 def report_sheet(library, run: dict, marks: list[dict]) -> Image.Image:
     summary = run["summary"]
-    unit = summary["scale"]["rail_unit"]
+    unit = summary.get("surface_unit", summary["scale"]["rail_unit"])
     if unit == "step":
         unit = "steps"
     title = summary["project_name"]
@@ -267,6 +267,8 @@ def _measurement_manifest(run: dict) -> dict:
             "value_at_65535": encoding["far"],
             "nodata": 0,
             "unit": encoding["unit"],
+            "calibrated_rail": encoding.get("calibrated", False),
+            "unmeasured_outside_calibration": encoding.get("unmeasured_outside_calibration", False),
         },
     }
 
@@ -283,7 +285,7 @@ def evidence_package(library, project_id: str, run_id: str):
         info = _measurement_manifest(run)
         add_zip_data(archive, "reconstruction.json", json_bytes(info))
         add_zip_data(archive, "capture-evidence.csv", capture_report(run["summary"]))
-        unit = run["summary"]["scale"]["rail_unit"]
+        unit = run["summary"].get("surface_unit", run["summary"]["scale"]["rail_unit"])
         add_zip_data(archive, "annotations.json", json_bytes(annotations_report(marks, run["title"], unit)))
         add_zip_data(archive, "annotations.csv", annotations_csv(marks, unit))
         cards = library.review_cards(project_id, run_id)

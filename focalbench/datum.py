@@ -10,7 +10,9 @@ def inspect_datum(inspection, region: Region, proposed: float | None) -> dict:
     depth = measured["positions"]
     reliable = measured["reliable_fraction"]
     count = measured["reliable_pixels"]
-    saved_origin = inspection.summary["scale"]["rail_offset"]
+    scale = inspection.summary["scale"]
+    saved_origin = scale["rail_offset"]
+    unit = inspection.unit
     material = depth["median"]
     if material is None or reliable < 0.35 or count < 12:
         return {
@@ -20,9 +22,20 @@ def inspect_datum(inspection, region: Region, proposed: float | None) -> dict:
             "reliable_pixels": count,
             "region": region.public(),
         }
+    if inspection.summary.get("rail_calibration"):
+        # A measured rail table fixes each step to its micrometre height; a
+        # display offset cannot move those readings, so refuse instead of
+        # suggesting a datum that would be ignored.
+        return {
+            "ready": False,
+            "reason": "The rail is calibrated with measured step and height pairs, so its readings already have an absolute scale. Clear the rail calibration to use a datum offset.",
+            "reliable_fraction": reliable,
+            "reliable_pixels": count,
+            "region": region.public(),
+        }
     wanted = 0.0 if proposed is None else proposed
     next_origin = saved_origin + material - wanted
-    limit = max(inspection.positions[-1] - inspection.positions[0], 1e-8)
+    limit = max(inspection.known_positions()[-1] - inspection.known_positions()[0], 1e-8)
     spread = depth["p95"] - depth["p05"]
     warning = "The selected patch spans a large range of focal depths." if spread > limit * 0.15 else None
     return {
@@ -30,7 +43,7 @@ def inspect_datum(inspection, region: Region, proposed: float | None) -> dict:
         "warning": warning,
         "reference_id": inspection.summary["reference_id"],
         "region": region.public(),
-        "unit": inspection.unit,
+        "unit": unit,
         "reliable_fraction": reliable,
         "reliable_pixels": count,
         "measured_median": material,
@@ -49,6 +62,8 @@ def apply_datum(library, project_id: str, inspection, measurement: dict, expecte
     snapshot = library.snapshot(project_id, expected)
     settings = snapshot["settings"]
     scale = settings["scale"]
+    if scale.get("rail_mode") == "calibration":
+        raise Conflict("The current rail uses measured step and height pairs. Clear that calibration before applying a datum.")
     if scale["rail_unit"] != measurement["unit"]:
         raise Conflict("The rail unit changed after this result. Reconstruct in current units first.")
     run_captures = {

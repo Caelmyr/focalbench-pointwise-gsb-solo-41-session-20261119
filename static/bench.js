@@ -207,6 +207,7 @@ function stageNote() {
 function refreshSide() {
   const element=el(".right-pane");
   if (element&&ui.tab==="result") element.outerHTML=resultPanel(ui);
+  else if (element&&ui.tab==="capture") element.outerHTML=capturePanel(ui);
   const note=el("#stage-help");
   if (note) note.textContent=stageNote();
 }
@@ -395,11 +396,18 @@ async function updateProject(data) {
   return project;
 }
 function fillRunDefaults(form) {
+  const mode=form.get("rail_mode")??"linear";
+  const scale=ui.stack.settings.scale;
+  const host=document.querySelector("#rail-pairs");
+  const pairs=host?Array.from(host.querySelectorAll(".field-row")).map(row=>({
+    step:row.querySelector('input[name="step"]')?.value,um:row.querySelector('input[name="um"]')?.value,
+  })).filter(row=>row.step!==""||row.um!==""):[];
   return {
     registration:form.get("registration"),reference_id:form.get("reference_id")||null,score:form.get("score"),
     blend:form.get("blend"),viewport:form.get("viewport"),
     confidence_floor:form.get("confidence_floor"),edge_guard:form.get("edge_guard"),strength:form.get("strength"),
-    scale:{rail_unit:form.get("rail_unit"),rail_offset:form.get("rail_offset"),pixel_um:form.get("pixel_um")||null},
+    scale:{rail_unit:form.get("rail_unit")??scale.rail_unit,rail_offset:form.get("rail_offset")??scale.rail_offset,
+      pixel_um:form.get("pixel_um")||null,rail_mode:mode,calibration:mode==="calibration"?{points:pairs}:scale.calibration},
   };
 }
 function currentRegion() {
@@ -664,6 +672,21 @@ const buttonActions={
   "stack-meta":()=>modal("Stack name and notes",`<div class="stack">${field("Name","name",ui.stack.name,{required:true})}${textArea("Stack note","note",ui.stack.note)}</div>`,async form=>{
     await updateProject(Object.fromEntries(form));toast("Stack details saved.");
   }),
+  "add-rail-pair":()=>{
+    const host=el("#rail-pairs");
+    if (!host) return;
+    const blank=host.querySelector(".empty-pair");
+    if (blank) blank.remove();
+    host.insertAdjacentHTML("beforeend",`<div class="field-row three-fields">
+      <label class="field">Stage step<input type="number" step="any" name="step" value=""></label>
+      <label class="field">Height (µm)<input type="number" step="any" name="um" value=""></label>
+      <button type="button" class="quiet" data-action="remove-rail-pair">Remove</button></div>`);
+    host.querySelector(".field-row:last-child input")?.focus();
+  },
+  "remove-rail-pair":(_,button)=>{
+    const row=button?.closest?.(".field-row");
+    if (row) row.remove();
+  },
   "fork-stack":()=>projectForm("Fork the current stack",ui.stack.name+" copy",async name=>{
     const newStack=await api(ui.paths.stack+"/fork",{method:"POST",data:{name}});await loadStack(newStack.id);
   },"Fork stack"),
@@ -692,9 +715,26 @@ const buttonActions={
   },
   "sharp-width":inspectSharp,
   "send-width":id=>{
-    const values=ui.result.summary.depth_encoding;
-    ui.schedule={first:values.near+ui.result.summary.scale.rail_offset,last:values.far+ui.result.summary.scale.rail_offset,
-      in_focus_width:Number(id),overlap_percent:40,usable_frames:24,settle_ms:300,interval_ms:200};
+    const summary=ui.result.summary, frames=summary.captures;
+    const steps=frames.map(row=>row.position);
+    const unit=summary.surface_unit;
+    const calibrated=summary.depth_encoding.calibrated;
+    // The schedule plan is in capture rail coordinates. A calibrated µm width
+    // only converts back to steps when the marks share one ratio.
+    let width=Number(id);
+    if (calibrated) {
+      const pairs=summary.rail_calibration?.points??[];
+      const ratios=pairs.slice(1).map((row,i)=>(row.um-pairs[i].um)/(row.step-pairs[i].step));
+      const spread=ratios.length?Math.max(...ratios)-Math.min(...ratios):Infinity;
+      if (ratios.length&&spread<=Math.max(...ratios)*0.02) width=width/ratios[0];
+      else {
+        toast(`This rail mixes ${ratios.length||"different"} measured spans, so a ${unit} sharp width reads differently at each step. Enter the plan in stage steps instead.`,true);
+        planForm();
+        return;
+      }
+    }
+    ui.schedule={first:Math.min(...steps),last:Math.max(...steps),
+      in_focus_width:width,overlap_percent:40,usable_frames:24,settle_ms:300,interval_ms:200};
     planForm();
   },
   "patch":patchDialog,
@@ -784,6 +824,7 @@ buttonActions["variants-csv"]=id=>download(ui.paths.result+"/variants",{other:id
 const formActions={
   "capture-form":editCapture,
   "settings-form":async form=>{
+    ui.railDraft=null;
     await updateProject({settings:fillRunDefaults(form)});toast("Reconstruction recipe saved.");
   },
   "deficits-form":findDeficits,
@@ -799,11 +840,25 @@ document.addEventListener("click",async event=>{
   if (!action) return;
   event.preventDefault();
   button.disabled=true;
-  try { await action(button.dataset.id); }
+  try { await action(button.dataset.id,button); }
   catch(error) { toast(error.message,true); }
   finally { if (button.isConnected) button.disabled=false; }
 });
 
+app.addEventListener("change",event=>{
+  if (event.target.name==="rail_mode"&&event.target.form?.id==="settings-form") {
+    const mode=event.target.value;
+    const current=ui.railDraft??ui.stack.settings.scale;
+    const draft={...current,rail_mode:mode};
+    if (mode==="calibration"&&!draft.calibration) draft.calibration={points:[]};
+    ui.railDraft=draft;
+    // Show the block for the chosen mode without re-rendering, so values typed
+    // in the other block are still there if the mode changes back.
+    event.target.form.querySelectorAll("[data-rail-blocks]").forEach(block=>{
+      block.hidden=block.dataset.railBlocks!==mode;
+    });
+  }
+});
 app.addEventListener("submit",async event=>{
   event.preventDefault();
   const action=formActions[event.target.id], button=event.submitter;

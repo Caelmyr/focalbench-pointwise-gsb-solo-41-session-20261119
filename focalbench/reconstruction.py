@@ -99,17 +99,41 @@ def capture_stack(library, captures: list[dict], reference: int, settings: RunSe
     return StackPlanes(rgb, coverage, response, response_support, motion_rows)
 
 
-def source_rows(positions, captures, settings, evidence_rows, motions, reference):
+def surface_coordinates(positions: np.ndarray, scale) -> tuple[np.ndarray, np.ndarray]:
+    """Plane coordinates for the depth fit and the displayed surface values.
+
+    An uncalibrated rail is linear, so both are the same array. A calibrated
+    rail keeps stage steps for the local fit and uses the measured height table
+    for the reported value; planes outside the marks are NaN and thus unmeasured.
+    """
+    if not scale.calibrated:
+        return positions, np.asarray(
+            [scale.display_position(float(position)) for position in positions],
+            dtype=np.float64,
+        )
+    display = np.asarray(
+        [np.nan if height is None else height for height in
+         (scale.calibration.height_at(position) for position in positions)],
+        dtype=np.float64,
+    )
+    return positions, display
+
+
+def source_rows(positions, captures, settings, evidence_rows, motions, reference, display=None):
+    if display is None:
+        display = np.asarray([settings.scale.display_position(position) for position in positions])
     rows = []
     for index, capture in enumerate(captures):
         position = float(positions[index])
+        shown = display[index]
         row = {
             "index": index,
             "id": capture["id"],
             "slot": capture["slot"],
             "name": capture["name"],
             "position": position,
-            "display_position": settings.scale.display_position(position),
+            "display_position": None if not np.isfinite(shown) else float(shown),
+            "inside_calibration": bool(np.isfinite(shown)),
             "is_reference": index == reference,
             "motion": motions[index],
             **evidence_rows[index],
@@ -128,6 +152,16 @@ def run_warnings(coverage: dict, surface: dict, captures: list[dict], statistics
         warnings.append({"code": "low-confidence", "detail": "Much of the surface lacks discriminating focus evidence."})
     if not statistics["uniform"]:
         warnings.append({"code": "nonuniform-positions", "detail": "This stack uses unequal rail steps."})
+    beyond = [capture["name"] for capture in captures if not capture.get("inside_calibration", True)]
+    if beyond:
+        names = ", ".join(beyond[:4]) + (" …" if len(beyond) > 4 else "")
+        warnings.append({
+            "code": "outside-rail-calibration",
+            "detail": (
+                f"{len(beyond)} capture(s) sit outside the measured rail pairs "
+                f"({names}). They still compose the image, but their surface depth is left empty."
+            ),
+        })
     for capture in captures:
         warning = capture["motion"]["warning"]
         if warning:
@@ -147,13 +181,25 @@ def summarize_result(
     planes: StackPlanes,
     positions: np.ndarray,
     displayed_depth: np.ndarray,
+    display: np.ndarray,
 ) -> dict:
     surfaces = focus_surface_summary(evidence, displayed_depth)
     coverage = overlap_summary(planes.coverage, AnalysisBox(0, 0, box.width, box.height))
     frames = frame_evidence(planes.response, planes.response_support, evidence)
-    rows = source_rows(positions, captures, settings, frames, planes.motions, reference)
+    rows = source_rows(positions, captures, settings, frames, planes.motions, reference, display)
     stats = rail_statistics(positions)
     origin = captures[reference]
+    measured = np.isfinite(display)
+    scale = settings.scale
+    if scale.calibrated:
+        calibrated = {
+            "mode": "calibration",
+            "unit": "µm",
+            "inside_range": measured.tolist(),
+            "points": scale.calibration.public()["points"],
+        }
+    else:
+        calibrated = None
     return {
         "algorithm": ALGORITHM_VERSION,
         "project_name": snapshot["project_name"],
@@ -165,6 +211,8 @@ def summarize_result(
         "crop": box.public(),
         "settings": settings.public(),
         "scale": settings.public()["scale"],
+        "surface_unit": scale.surface_unit,
+        "rail_calibration": calibrated,
         "capture_count": len(captures),
         "reference_id": origin["id"],
         "reference_name": origin["name"],
@@ -176,9 +224,11 @@ def summarize_result(
             "no_data": 0,
             "minimum_code": 1,
             "maximum_code": 65535,
-            "near": settings.scale.display_position(float(positions[0])),
-            "far": settings.scale.display_position(float(positions[-1])),
-            "unit": settings.scale.rail_unit,
+            "near": float(np.nanmin(display)) if measured.any() else None,
+            "far": float(np.nanmax(display)) if measured.any() else None,
+            "unit": scale.surface_unit,
+            "calibrated": scale.calibrated,
+            "unmeasured_outside_calibration": bool(np.any(~measured)),
         },
         "warnings": run_warnings(coverage, surfaces, rows, stats),
         **surfaces,
@@ -222,14 +272,21 @@ def calculate(library, snapshot: dict) -> Calculation:
     planes = capture_stack(library, captures, reference, settings, size)
     box = output_viewport(planes.coverage, settings.viewport)
     planes.cut(box)
+    _, display = surface_coordinates(positions, settings.scale)
     peaks = analyze_peaks(
-        planes.response, planes.coverage, planes.response_support, positions, settings.confidence_floor,
+        planes.response, planes.coverage, planes.response_support, positions,
+        settings.confidence_floor, display,
     )
     color = assemble_composite(planes.rgb, planes.coverage, planes.response, peaks, settings.blend, settings.strength)
-    products = output_images(color, peaks, planes.coverage, (float(positions[0]), float(positions[-1])))
-    displayed_depth = peaks.depth - settings.scale.rail_offset
+    measured = display[np.isfinite(display)]
+    products = output_images(
+        color, peaks, planes.coverage,
+        (float(measured.min()), float(measured.max())) if measured.size else (0.0, 0.0),
+    )
+    displayed_depth = peaks.depth.astype(np.float64, copy=True)
     summary = summarize_result(
-        snapshot, box, size, settings, captures, reference, peaks, planes, positions, displayed_depth,
+        snapshot, box, size, settings, captures, reference, peaks, planes, positions,
+        displayed_depth, display,
     )
     return Calculation(peaks, planes, products, displayed_depth, summary)
 

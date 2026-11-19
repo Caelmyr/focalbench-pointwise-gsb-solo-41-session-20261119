@@ -312,4 +312,7 @@ def annotations_download(project_id, run_id):
     run = library().run(project_id, run_id)
     name = file_title(run["title"], "-annotations.csv")
     marks = library().list_marks(project_id, run_id)
-    return file_response(annotations_csv(marks, run["summary"]["scale"]["rail_unit"]), "text/csv", name)
+    return file_response(
+        annotations_csv(marks, run["summary"].get("surface_unit", run["summary"]["scale"]["rail_unit"])),
+        "text/csv", name,
+    )

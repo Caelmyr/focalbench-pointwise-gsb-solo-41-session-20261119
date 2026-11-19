@@ -66,7 +66,7 @@ def pair_from_run(library, run: dict, first: str, second: str, *, registered: bo
         original["name"], other["name"],
         (first_pose["display_position"], other_pose["display_position"]),
         registered,
-        summary["scale"]["rail_unit"],
+        summary.get("surface_unit", summary["scale"]["rail_unit"]),
     )
 
 

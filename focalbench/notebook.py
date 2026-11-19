@@ -71,6 +71,7 @@ def create_card(library, project_id: str, result: dict, payload: dict):
         "measurement": readings,
         "reference_name": inspection.summary["reference_name"],
         "rail_unit": inspection.unit,
+        "surface_unit": inspection.surface_unit,
         "source_revision": result["source_revision"],
     }
     return library.add_card(project_id, result["id"], title, content)
@@ -105,7 +106,7 @@ def _measurement_caption(content: dict):
     if measurement is None:
         return "Whole image"
     kind = content["selection"]["kind"]
-    unit = content["rail_unit"]
+    unit = content.get("surface_unit", content["rail_unit"])
     if kind == "pin":
         value = measurement["position"]
         if measurement["reliable"]:

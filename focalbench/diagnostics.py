@@ -104,7 +104,8 @@ def characterize_focus(inspection: Inspection, region: Region, fraction: float) 
         "strongest": best.public(),
         "bands": [item.public() for item in spans],
         "curve": [
-            {"position": float(position), "response": float(score[index]) if finite[index] else None}
+            {"position": float(position) if np.isfinite(position) else None,
+             "response": float(score[index]) if finite[index] else None}
             for index, position in enumerate(stages)
         ],
         "warnings": warnings,

@@ -189,7 +189,8 @@ def output_images(
     contributor_count = aligned_support.sum(axis=0)
     overlap = palette_map(contributor_count / len(aligned_support), _CONFIDENCE_PALETTE)
     codes = np.zeros(evidence.valid.shape, dtype=np.uint16)
-    codes[reliable] = (np.clip(fraction[reliable], 0, 1) * 65534 + 1.5).astype(np.uint16)
+    measured = reliable & np.isfinite(evidence.depth)
+    codes[measured] = (np.clip(fraction[measured], 0, 1) * 65534 + 1.5).astype(np.uint16)
     return ProductImages(
         composite=covered_image(linear_to_srgb(composite), evidence.valid),
         depth=covered_image(shaded, evidence.valid),

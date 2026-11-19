@@ -4,7 +4,7 @@ import csv
 import io
 from collections import Counter, defaultdict
 
-from .models import Capacity, Unprocessable, number
+from .models import Capacity, CaptureScale, Unprocessable, number
 
 MAX_LOG_BYTES = 100_000
 MAX_LINES = 256
@@ -20,17 +20,26 @@ def _parse_unit(value: str, fallback: str) -> str:
     return unit
 
 
-def _to_project(value: float, source_unit: str, target_unit: str) -> float:
+def _to_project(value: float, source_unit: str, target_unit: str, calibration=None) -> float:
     if source_unit == target_unit:
         return value
     first = UNIT_SCALE[source_unit]
     last = UNIT_SCALE[target_unit]
     if first is None or last is None:
+        # A calibrated rail is the only way to turn a measured height back
+        # into the stage step that produced it.
+        if calibration is not None and target_unit == "step" and source_unit == "µm":
+            step = calibration.step_at(value)
+            if step is None:
+                raise Unprocessable(
+                    f"{value:g} µm is outside the measured rail calibration.",
+                )
+            return number(step, "converted position", -1e7, 1e7)
         raise Unprocessable("A step count cannot be converted to a physical position without calibration.")
     return number(value * first / last, "converted position", -1e7, 1e7)
 
 
-def _read_log(raw: bytes, target_unit: str) -> list[dict]:
+def _read_log(raw: bytes, target_unit: str, calibration=None) -> list[dict]:
     if len(raw) > MAX_LOG_BYTES:
         raise Capacity("A rail log may contain up to 100 kB.")
     try:
@@ -59,7 +68,8 @@ def _read_log(raw: bytes, target_unit: str) -> list[dict]:
             original = number(row["position"], f"position on line {table.line_num}", -1e7, 1e7)
             results.append({
                 "line": table.line_num, "filename": file_name, "raw_position": original,
-                "raw_unit": source_unit, "new_position": _to_project(original, source_unit, target_unit),
+                "raw_unit": source_unit,
+                "new_position": _to_project(original, source_unit, target_unit, calibration),
             })
     except csv.Error as error:
         raise Unprocessable("The rail log could not be parsed as CSV.") from error
@@ -69,8 +79,12 @@ def _read_log(raw: bytes, target_unit: str) -> list[dict]:
 
 
 def stage_log(project: dict, raw: bytes) -> tuple[dict, dict[str, float]]:
-    unit = project["settings"]["scale"]["rail_unit"]
-    records = _read_log(raw, unit)
+    scale = project["settings"]["scale"]
+    unit = scale["rail_unit"]
+    calibration = None
+    if scale.get("rail_mode") == "calibration" and scale.get("calibration"):
+        calibration = CaptureScale.parse(scale).calibration
+    records = _read_log(raw, unit, calibration)
     captures = [item for item in project["captures"] if not item["archived"]]
     by_name = defaultdict(list)
     for capture in captures:
