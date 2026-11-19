@@ -270,6 +270,11 @@ function drawSelection() {
     }
   }
   const rectangle=region=>[[region.left,region.top],[region.right,region.top],[region.right,region.bottom],[region.left,region.bottom]];
+  const patchRegion=ui.stack.settings.lighting?.region;
+  if (patchRegion) {
+    const shown=displayRegion(patchRegion);
+    if (shown) markup(rectangle(shown),"area",styles.cyan,"Light patch");
+  }
   for (const mark of ui.tab==="result"?ui.marks:[]) markup(mark.vertices,mark.kind,styles[mark.color],mark.label);
   const selection=ui.selection;
   if (selection.kind==="pin") markup([selection.point],"pin",styles.amber);
@@ -394,16 +399,50 @@ async function updateProject(data) {
   replaceProject(project);
   return project;
 }
+async function applyLightPatch(value, message) {
+  const next=structuredClone(ui.stack.settings);
+  next.lighting={model:"gain",region:value};
+  const project=await api(ui.paths.stack,{method:"PATCH",data:{revision:ui.stack.revision,settings:next}});
+  replaceProject(project,message);
+}
 function fillRunDefaults(form) {
+  const fields=["left","top","right","bottom"].map(key=>form.get("lighting_region_"+key)).filter(value=>value!==null&&value!=="");
+  const region=fields.length===4?Object.fromEntries(["left","top","right","bottom"].map(key=>[key,Number(form.get("lighting_region_"+key))])):null;
   return {
     registration:form.get("registration"),reference_id:form.get("reference_id")||null,score:form.get("score"),
     blend:form.get("blend"),viewport:form.get("viewport"),
     confidence_floor:form.get("confidence_floor"),edge_guard:form.get("edge_guard"),strength:form.get("strength"),
     scale:{rail_unit:form.get("rail_unit"),rail_offset:form.get("rail_offset"),pixel_um:form.get("pixel_um")||null},
+    lighting:{model:"gain",region},
   };
 }
 function currentRegion() {
   return ui.selection.kind==="area"?ui.selection.region:null;
+}
+function referenceCaptureId() {
+  const frames=ui.stack.captures.filter(item=>item.included&&!item.archived)
+    .slice().sort((a,b)=>a.position-b.position||(a.id<b.id?-1:1));
+  return ui.stack.settings.reference_id??frames[Math.floor(frames.length/2)]?.id;
+}
+function referenceRegion(region) {
+  if (ui.tab!=="result"||!ui.result) return region;
+  const {crop,processed_size,width,height}=ui.result.summary;
+  const across=value=>(crop.x+value*width)/processed_size[0];
+  const down=value=>(crop.y+value*height)/processed_size[1];
+  return {left:across(region.left),top:down(region.top),right:across(region.right),bottom:down(region.bottom)};
+}
+function displayRegion(region) {
+  if (ui.tab==="capture") return currentCapture()?.id===referenceCaptureId()?region:null;
+  if (ui.tab!=="result"||!ui.result) return null;
+  const {crop,processed_size,width,height}=ui.result.summary;
+  const across=value=>(value*processed_size[0]-crop.x)/width;
+  const down=value=>(value*processed_size[1]-crop.y)/height;
+  const shown={left:across(region.left),top:down(region.top),right:across(region.right),bottom:down(region.bottom)};
+  if (shown.right<=0||shown.bottom<=0||shown.left>=1||shown.top>=1) return null;
+  return {
+    left:Math.max(0,shown.left),top:Math.max(0,shown.top),
+    right:Math.min(1,shown.right),bottom:Math.min(1,shown.bottom),
+  };
 }
 function queryRegion(region) {
   return region??{};
@@ -681,6 +720,14 @@ const buttonActions={
     showReadout("Capture contact sheet",link("Contact sheet PNG",ui.paths.stack+"/contact.png?download=1"+(ui.showArchived?"&archived=1":"")));
   },
   "exposure":exposureReadout,
+  "lighting-from-selection":async ()=>{
+    if (ui.selection.kind!=="area") throw new Error("Drag a rectangle on the reference capture or a result first.");
+    if (ui.tab==="capture"&&currentCapture()?.id!==referenceCaptureId()) {
+      throw new Error("Draw the patch on the reference capture, or select an area in a result.");
+    }
+    await applyLightPatch(referenceRegion(ui.selection.region),"Light-matching patch saved.");
+  },
+  "lighting-clear":async ()=>applyLightPatch(null,"Light-matching patch cleared."),
   "reconstruct":async ()=>{
     if (ui.busy) return;
     ui.busy=true;render();toast("Aligning captures and computing focus evidence…");

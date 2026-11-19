@@ -79,10 +79,13 @@ def add_zip_data(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
 def _capture_rows(summary: dict):
     for item in summary["captures"]:
         motion = item["motion"]
+        light = item.get("light") or {}
         yield (
             item["index"] + 1, item["slot"], item["id"], item["name"], item["position"],
             item["display_position"], summary["scale"]["rail_unit"], item["is_reference"],
             motion["dx"], motion["dy"], motion["scale"], motion["score"], motion["overlap"],
+            light.get("status"), light.get("gain"), light.get("log_sigma"), light.get("hops"),
+            light.get("reason"),
             item["valid_fraction"], item["median_response"], item["p95_response"],
             item["winner_count"], item["winner_fraction"], motion["warning"],
         )
@@ -92,6 +95,7 @@ def capture_report(summary: dict) -> bytes:
     fields = (
         "plane", "capture_slot", "capture_id", "capture_filename", "rail_position", "display_position",
         "rail_unit", "reference", "shift_x_px", "shift_y_px", "zoom_scale", "alignment_score", "overlap",
+        "light_match", "light_gain", "light_log_sigma", "light_hops", "light_note",
         "usable_focus_fraction", "median_response", "p95_response", "reliable_winners",
         "reliable_fraction", "warning",
     )
@@ -125,6 +129,12 @@ def schedule_report(results: dict, unit: str) -> bytes:
 def annotations_report(marks: list[dict], title: str, unit: str) -> dict:
     return {"analysis": title, "position_unit": unit, "space": "normalized archived result", "marks": marks}
 
+
+def _source_count(summary: dict) -> str:
+    fused = summary.get("fused_capture_count", summary["capture_count"])
+    if fused == summary["capture_count"]:
+        return f"{fused} source captures"
+    return f"{fused} of {summary['capture_count']} source captures"
 
 def inspection_sheet(library, captures: list[dict], title: str, unit: str, columns: int) -> Image.Image:
     width = 338
@@ -227,7 +237,7 @@ def report_sheet(library, run: dict, marks: list[dict]) -> Image.Image:
     annotated = _annotated_image(library, run, marks)
     base = library.run_directory(run["id"])
     _image_card(sheet, annotated, (35, 145), (695, 451), "All-in-focus reconstruction",
-                f"{summary['width']} × {summary['height']} pixels  ·  {summary['capture_count']} source captures")
+                f"{summary['width']} × {summary['height']} pixels  ·  {_source_count(summary)}")
     with Image.open(base / RUN_ASSETS["depth"]) as depth_image:
         _image_card(sheet, depth_image, (757, 145), (405, 214), "Estimated focus surface",
                     f"Depth span {_format(depth['p05'])} to {_format(depth['p95'])} {unit} (P05–P95)")

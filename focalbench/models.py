@@ -250,6 +250,30 @@ class CapturePlan:
 
 
 @dataclass(frozen=True)
+class LightingSettings:
+    """A material patch in normalized reference coordinates used to match capture light."""
+
+    region: Region | None = None
+    model: str = "gain"
+
+    @classmethod
+    def parse(cls, payload: Any):
+        raw = object_value(payload, "lighting")
+        validate_keys(raw, {"region", "model"}, "lighting")
+        region = raw.get("region")
+        return cls(
+            region=None if region is None else Region.parse(region),
+            model=choice(raw.get("model", "gain"), "light model", ("gain",)),
+        )
+
+    def public(self) -> dict:
+        return {
+            "model": self.model,
+            "region": None if self.region is None else self.region.public(),
+        }
+
+
+@dataclass(frozen=True)
 class RunSettings:
     registration: str = "breathing"
     reference_id: str | None = None
@@ -260,13 +284,14 @@ class RunSettings:
     confidence_floor: float = 0.16
     edge_guard: int = 3
     strength: float = 0.7
+    lighting: LightingSettings = field(default_factory=LightingSettings)
 
     @classmethod
     def parse(cls, payload: Any):
         raw = object_value(payload, "settings")
         validate_keys(raw, {
             "registration", "reference_id", "score", "blend", "viewport",
-            "scale", "confidence_floor", "edge_guard", "strength",
+            "scale", "confidence_floor", "edge_guard", "strength", "lighting",
         }, "settings")
         reference = raw.get("reference_id")
         return cls(
@@ -282,6 +307,7 @@ class RunSettings:
             confidence_floor=number(raw.get("confidence_floor", 0.16), "confidence floor", 0, 0.95),
             edge_guard=integer(raw.get("edge_guard", 3), "edge guard", 0, 12),
             strength=number(raw.get("strength", 0.7), "fusion strength", 0.1, 1.0),
+            lighting=LightingSettings.parse(raw.get("lighting", {})),
         )
 
     def public(self) -> dict:

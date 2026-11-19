@@ -9,6 +9,7 @@ from scipy import ndimage
 from .alignment import AnalysisBox, Motion, warp
 from .fusion import covered_image, difference_overlay
 from .imaging import fit_size, linear_luminance, linear_to_srgb, percentile_summary, read_pixels
+from .lighting import apply_gain, capture_gain
 from .models import Missing, Region, Unprocessable
 
 
@@ -52,8 +53,9 @@ def pair_from_run(library, run: dict, first: str, second: str, *, registered: bo
     summary = run["summary"]
     size = tuple(summary["processed_size"])
     box = AnalysisBox(**summary["crop"])
-    first_capture = read_pixels(library, original, size)
-    second_capture = read_pixels(library, other, size)
+    lighting = summary.get("lighting")
+    first_capture = _matched_capture(library, original, size, capture_gain(lighting, first))
+    second_capture = _matched_capture(library, other, size, capture_gain(lighting, second))
     if registered:
         fixed = warp(first_capture, _motion(first_pose["motion"]))
         moved = warp(second_capture, _motion(other_pose["motion"]))
@@ -68,6 +70,13 @@ def pair_from_run(library, run: dict, first: str, second: str, *, registered: bo
         registered,
         summary["scale"]["rail_unit"],
     )
+
+
+def _matched_capture(library, capture: dict, size: tuple[int, int], gain: float):
+    pixels = read_pixels(library, capture, size)
+    if abs(gain - 1.0) >= 1e-6:
+        pixels.rgb = apply_gain(pixels.rgb, gain)
+    return pixels
 
 
 def _local_contrast(image: np.ndarray) -> np.ndarray:

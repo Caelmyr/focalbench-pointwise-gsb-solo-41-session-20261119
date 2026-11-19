@@ -13,10 +13,14 @@ from .alignment import AnalysisBox, RailAlignment, output_viewport, overlap_summ
 from .focus import FocusEvidence, analyze_peaks, frame_evidence, image_response, rail_statistics
 from .fusion import ProductImages, assemble_composite, output_images
 from .imaging import assert_compatible_dimensions, linear_luminance, processing_size, read_pixels
-from .models import RUN_ASSETS, Capacity, Conflict, RunSettings, Unprocessable, require_frame_count, storage_id
+from .lighting import match_lighting
+from .models import (
+    MIN_FRAMES, RUN_ASSETS, Capacity, Conflict, RunSettings, Unprocessable,
+    require_frame_count, storage_id,
+)
 from .surface import focus_surface_summary
 
-ALGORITHM_VERSION = "1.0"
+ALGORITHM_VERSION = "1.1"
 RESULT_LIMIT = 36
 RESULT_LAYERS = (
     "depth", "confidence", "selected", "alternate", "valid", "reliable", "interpolated", "contributors",
@@ -31,6 +35,8 @@ class StackPlanes:
     response: np.ndarray
     response_support: np.ndarray
     motions: list[dict]
+    lighting: dict | None = None
+    fusion_mask: np.ndarray | None = None
 
     def cut(self, box: AnalysisBox) -> None:
         vertical = slice(box.y, box.y + box.height)
@@ -86,23 +92,53 @@ def capture_stack(library, captures: list[dict], reference: int, settings: RunSe
         aligned = aligner.align(pixels, reference=index == reference)
         rgb[index] = aligned.rgb
         coverage[index] = aligned.support
-        focus, eligible = image_response(
-            linear_luminance(aligned.rgb), aligned.support, settings.score, settings.edge_guard,
-        )
-        response[index] = focus
-        response_support[index] = eligible
         motion_rows.append({
             **aligned.motion.public(),
             "source_coverage": round(float(pixels.support.mean()), 6),
             "aligned_coverage": round(float(aligned.support.mean()), 6),
         })
-    return StackPlanes(rgb, coverage, response, response_support, motion_rows)
+    match = match_lighting(
+        rgb, coverage, reference, settings.lighting.region, captures,
+    )
+    fusion_mask = np.ones(channels, dtype=bool)
+    if match is not None:
+        fusion_mask = match.matched
+        if not fusion_mask[reference]:
+            raise Unprocessable("The reference capture could not be light matched.", field="lighting")
+        kept = int(fusion_mask.sum())
+        if kept < MIN_FRAMES:
+            raise Unprocessable(
+                f"Only {kept} capture{'' if kept == 1 else 's'} "
+                f"{'has' if kept == 1 else 'have'} a trustworthy light comparison, "
+                f"and {MIN_FRAMES} are needed to reconstruct. Exclude or retake the captures "
+                "named in the light match.",
+                field="lighting",
+                details={"excluded": [
+                    row["name"] for row in match.report["captures"] if row["status"] == "unmatched"
+                ]},
+            )
+        coverage[~fusion_mask] = False
+    for index in range(channels):
+        focus, eligible = image_response(
+            linear_luminance(rgb[index]), coverage[index], settings.score, settings.edge_guard,
+        )
+        response[index] = focus
+        response_support[index] = eligible if fusion_mask[index] else False
+    return StackPlanes(
+        rgb, coverage, response, response_support, motion_rows,
+        None if match is None else match.report,
+        fusion_mask,
+    )
 
 
-def source_rows(positions, captures, settings, evidence_rows, motions, reference):
+def source_rows(positions, captures, settings, evidence_rows, motions, reference, lighting=None):
+    gains = {}
+    if lighting:
+        gains = {row["index"]: row for row in lighting["captures"]}
     rows = []
     for index, capture in enumerate(captures):
         position = float(positions[index])
+        match = gains.get(index)
         row = {
             "index": index,
             "id": capture["id"],
@@ -112,13 +148,20 @@ def source_rows(positions, captures, settings, evidence_rows, motions, reference
             "display_position": settings.scale.display_position(position),
             "is_reference": index == reference,
             "motion": motions[index],
+            "light": None if match is None else {
+                "status": match["status"],
+                "gain": match["gain"],
+                "log_sigma": match["log_sigma"],
+                "hops": match["hops"],
+                "reason": match["reason"],
+            },
             **evidence_rows[index],
         }
         rows.append(row)
     return rows
 
 
-def run_warnings(coverage: dict, surface: dict, captures: list[dict], statistics: dict) -> list[dict]:
+def run_warnings(coverage: dict, surface: dict, captures: list[dict], statistics: dict, lighting=None) -> list[dict]:
     warnings = []
     if coverage["visible_fraction"] < 0.98:
         warnings.append({"code": "holes", "detail": "Some output pixels lack any aligned capture."})
@@ -133,6 +176,8 @@ def run_warnings(coverage: dict, surface: dict, captures: list[dict], statistics
         if warning:
             warnings.append({"code": "alignment", "capture_id": capture["id"],
                              "detail": f"{capture['name']}: {warning}"})
+    if lighting:
+        warnings.extend(lighting["warnings"])
     return warnings
 
 
@@ -151,9 +196,12 @@ def summarize_result(
     surfaces = focus_surface_summary(evidence, displayed_depth)
     coverage = overlap_summary(planes.coverage, AnalysisBox(0, 0, box.width, box.height))
     frames = frame_evidence(planes.response, planes.response_support, evidence)
-    rows = source_rows(positions, captures, settings, frames, planes.motions, reference)
+    rows = source_rows(positions, captures, settings, frames, planes.motions, reference, planes.lighting)
     stats = rail_statistics(positions)
     origin = captures[reference]
+    participating = (
+        len(captures) if planes.fusion_mask is None else int(planes.fusion_mask.sum())
+    )
     return {
         "algorithm": ALGORITHM_VERSION,
         "project_name": snapshot["project_name"],
@@ -166,11 +214,13 @@ def summarize_result(
         "settings": settings.public(),
         "scale": settings.public()["scale"],
         "capture_count": len(captures),
+        "fused_capture_count": participating,
         "reference_id": origin["id"],
         "reference_name": origin["name"],
         "captures": rows,
         "coverage": coverage,
         "rail": stats,
+        "lighting": planes.lighting,
         "depth_encoding": {
             "format": "png-uint16",
             "no_data": 0,
@@ -180,7 +230,7 @@ def summarize_result(
             "far": settings.scale.display_position(float(positions[-1])),
             "unit": settings.scale.rail_unit,
         },
-        "warnings": run_warnings(coverage, surfaces, rows, stats),
+        "warnings": run_warnings(coverage, surfaces, rows, stats, planes.lighting),
         **surfaces,
     }
 

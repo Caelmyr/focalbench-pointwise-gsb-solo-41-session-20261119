@@ -66,6 +66,7 @@ export function capturePanel(ui) {
 function settingsForm(ui) {
   const config=ui.stack.settings;
   const references=ui.stack.captures.filter(item=>item.included&&!item.archived).map(item=>[item.id,item.name+" ("+n(item.position)+")"]);
+  const light=config.lighting??{};
   return `<form id="settings-form" class="box stack">
     <h3>Reconstruction recipe</h3>
     ${select("Registration","registration",[["breathing","Translate and scale"],["translation","Translation only"],["none","Already aligned"]],config.registration)}
@@ -78,6 +79,14 @@ function settingsForm(ui) {
     <div class="field-row">${select("Rail unit","rail_unit",[["µm","µm"],["mm","mm"],["step","Stage steps"]],config.scale.rail_unit)}${field("Rail origin","rail_offset",config.scale.rail_offset,{type:"number",step:"any"})}</div>
     ${field("Reference pixel size (µm / px)","pixel_um",config.scale.pixel_um??"",{type:"number",step:"any",placeholder:"Uncalibrated"})}
     <button type="submit">Save recipe</button>
+    <div class="subhead"><h3>Light matching</h3>${light.region?"Patch saved":"No patch selected"}</div>
+    <p class="muted">Select one evenly lit area of the same material. Each capture is scaled to the reference there; a capture that cannot be compared is left out of the result and named.</p>
+    ${["lighting_region_left","lighting_region_top","lighting_region_right","lighting_region_bottom"].map((name,index)=>{
+      const key=["left","top","right","bottom"][index];
+      return field("Patch "+key,name,(light.region??{})[key]??"",{type:"number",min:0,max:1,step:.001});
+    }).join("")}
+    <div class="row">${control("Use current selection","lighting-from-selection",{disabled:!["capture","result"].includes(ui.tab)||ui.selection?.kind!=="area"})}${light.region?control("Clear patch","lighting-clear"):""}</div>
+    <p class="muted">Coordinates are in the reference frame. Draw on the reference capture, or pick an area in a result and use it here.</p>
   </form>`;
 }
 
@@ -99,9 +108,11 @@ export function resultPanel(ui) {
       ${stat("Shared frame overlap",percent(cfg.coverage.shared_fraction))}
       ${cfg.warnings.length?`<details><summary>${cfg.warnings.length} observation${cfg.warnings.length===1?"":"s"}</summary>${cfg.warnings.map(item=>warning(item.detail)).join("")}</details>`:""}
     `)}
+    ${box("Light matching",lightingPanel(ui))}
     ${box("Selection actions",`
        <div class="row">${control("Sharp interval","sharp-width",{disabled:!area})}${control("Export patch","patch",{disabled:!area})}
        ${control("Use as rail datum","datum",{disabled:!area})}${control("Calibrate pixel scale","calibrate",{disabled:!section})}
+       ${control("Light patch","lighting-from-selection",{disabled:!area,title:"Use this area as the light-matching patch for the next reconstruction"})}
        ${control("Section CSV","section-csv",{disabled:!section})}</div>
     `)}
     ${box("Coverage details",`<form id="deficits-form" class="stack">
@@ -117,6 +128,24 @@ export function resultPanel(ui) {
   </div>${content??""}</aside>`;
 }
 
+function lightingPanel(ui) {
+  const light=ui.result.summary.lighting;
+  if (!light) return `<p class="muted">No material patch was part of this recipe, so every capture kept its recorded brightness.</p>`;
+  const labels={reference:"Reference",direct:"Matched",bridged:"Bridged",unmatched:"Left out"};
+  const rows=light.captures.map(item=>[
+    item.name,labels[item.status]??item.status,
+    item.status==="unmatched"?"—":n(item.gain,4)+"×",
+    item.hops?String(item.hops):"—",
+    item.reason??"—",
+  ]);
+  const excluded=light.excluded_ids?.length
+    ? light.captures.filter(item=>light.excluded_ids.includes(item.id)).map(item=>item.name)
+    : light.captures.filter(item=>item.status==="unmatched").map(item=>item.name);
+  return `${metrics([["Patch samples",n(light.samples,0)],["Corrected",n(light.corrected,0)],["Left out",n(light.unmatched,0)]])}
+    ${excluded.length?warning(`Left out of this reconstruction for lack of a trustworthy light comparison: ${excluded.join(", ")}. Their original files remain in the stack.`):""}
+    <p class="muted">A gain multiplies each aligned capture before focus evidence. Bridged captures were matched through other frames in the patch.</p>
+    ${table(["Capture","Light","Gain","Hops","Note"],rows)}`;
+}
 function planePanel(ui) {
   const frames=ui.result.summary.captures;
   const unit=ui.result.summary.scale.rail_unit;

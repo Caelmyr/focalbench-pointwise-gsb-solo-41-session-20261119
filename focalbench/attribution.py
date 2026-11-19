@@ -9,6 +9,7 @@ from scipy import ndimage
 
 from .alignment import AnalysisBox, Motion, warp
 from .imaging import linear_to_srgb, read_pixels
+from .lighting import apply_gain, capture_gain
 from .models import Missing
 from .surface import Inspection
 
@@ -99,6 +100,9 @@ def contribution_summary(inspection: Inspection, attribution: Attribution, minim
 def _registered_source(library, attribution: Attribution, result: dict):
     summary = result["summary"]
     pixels = read_pixels(library, attribution.capture, tuple(summary["processed_size"]))
+    gain = capture_gain(summary.get("lighting"), attribution.capture["id"])
+    if abs(gain - 1.0) >= 1e-6:
+        pixels.rgb = apply_gain(pixels.rgb, gain)
     metadata = attribution.row["motion"]
     aligned = warp(pixels, Motion(dx=metadata["dx"], dy=metadata["dy"], scale=metadata["scale"]))
     box = AnalysisBox(**summary["crop"])
